@@ -1,0 +1,80 @@
+# Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This is the dockerfile for building packages on yum-based RPM systems.
+
+ARG BASEIMAGE
+FROM ${BASEIMAGE}
+
+RUN yum install -y \
+        ca-certificates \
+        gcc \
+        wget \
+        git \
+        make \
+        rpm-build && \
+    rm -rf /var/cache/yum/*
+
+ARG GOLANG_VERSION=0.0.0
+RUN set -eux; \
+    \
+    arch="$(uname -m)"; \
+    case "${arch##*-}" in \
+        x86_64 | amd64) ARCH='amd64' ;; \
+        ppc64el | ppc64le) ARCH='ppc64le' ;; \
+        aarch64 | arm64) ARCH='arm64' ;; \
+        *) echo "unsupported architecture"; exit 1 ;; \
+    esac; \
+    wget -nv -O - https://storage.googleapis.com/golang/go${GOLANG_VERSION}.linux-${ARCH}.tar.gz \
+    | tar -C /usr/local -xz
+
+ENV GOPATH /go
+ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
+
+# packaging
+ARG PKG_NAME
+ARG PKG_VERS
+ARG PKG_REV
+ENV PKG_NAME ${PKG_NAME}
+ENV PKG_VERS ${PKG_VERS}
+ENV PKG_REV ${PKG_REV}
+
+# output directory
+ENV DIST_DIR=/tmp/nvidia-container-toolkit-$PKG_VERS/SOURCES
+RUN mkdir -p $DIST_DIR /dist
+
+# nvidia-container-toolkit
+WORKDIR $GOPATH/src/nvidia-container-toolkit
+COPY . .
+
+ARG GIT_COMMIT
+ENV GIT_COMMIT ${GIT_COMMIT}
+RUN make PREFIX=${DIST_DIR} cmds
+
+WORKDIR $DIST_DIR/..
+COPY packaging/rpm .
+
+ARG LIBNVIDIA_CONTAINER_TOOLS_VERSION
+ENV LIBNVIDIA_CONTAINER_TOOLS_VERSION ${LIBNVIDIA_CONTAINER_TOOLS_VERSION}
+
+CMD arch=$(uname -m) && \
+    rpmbuild --clean --target=$arch -bb \
+             -D "_topdir $PWD" \
+             -D "release_date $(date +'%a %b %d %Y')" \
+             -D "git_commit ${GIT_COMMIT}" \
+             -D "version ${PKG_VERS}" \
+             -D "libnvidia_container_tools_version ${LIBNVIDIA_CONTAINER_TOOLS_VERSION}" \
+             -D "release ${PKG_REV}" \
+             SPECS/nvidia-container-toolkit.spec && \
+    mv RPMS/$arch/*.rpm /dist
